@@ -1,0 +1,3 @@
+Genetic optimization for the tuning parameters for a PID control system that controls the position of a particle. The target is to follow the target function as closely as possible, which can include limits on acceleration, velocity, etc.
+
+The slowest part of the program is the calculation of the control response within the simulation due to having to re-calculate the integral term. I've tried to make it better by only considering the portions being added or removed from the integral memory array, but this results in bad numerical stability after a while. To counter this, I added a periodic re-summing with good accuracy every 100 iterations which should help with accuracy but hurts speed.

@@ -1,0 +1,226 @@
+use std
+use math
+
+type state_t = struct
+	integral_vals : flt64[:]
+	last_val : flt64
+	dt : flt64
+	iters : int64
+	running_sum : flt64
+;;
+
+type control_t = struct
+	kp : flt64
+	kd : flt64
+	ki : flt64
+;;
+
+const sum = {arr : flt64[:] -> flt64
+	var acc = 0.0
+	for var i = 0; i < arr.len; i++
+		acc += arr[i]
+	;;
+	-> acc
+}
+
+/* sp = setpoint, pv = provess variable/value */
+const control = {sp, pv, control, state, i -> flt64
+	var e =  sp - pv
+	
+	/* TODO:
+	 * Running sum optimization increases speed 10x but also throws
+	 * numerical stability out the window (probably).
+	 * Add periodic resumming of integral term?
+	 */
+	 
+	var index = i % state.integral_vals.len
+
+	if i >= state.integral_vals.len
+		state.running_sum -= state.integral_vals[index]
+	;;
+
+	state.running_sum += e * state.dt
+	state.integral_vals[index] = e * state.dt
+
+	/* Re-calculate sum every n (50? 100?) iterations to preserve numerical
+	 * accuracy
+	 * Priest summation seems to produce more consistent results than Kahan,
+	 * but is slower.
+	 */
+	if (i + 1) % 100 == 0
+		state.running_sum = math.priest_sum(state.integral_vals)
+	;;
+	
+	//var integral = math.kahan_sum(state.integral_vals)
+	var integral = state.running_sum
+	var der = (e - state.last_val) / state.dt
+	state.last_val = e
+
+	-> control.kp * e + control.ki * integral + control.kd * der
+}
+
+const setpoint = {t : flt64 -> flt64
+	if t < 2.0
+		-> 0.0
+	;;
+	-> 2.0
+}
+
+
+const filter = {t : flt64, sp : flt64, accel : flt64, pos -> bool
+	const max_val = 9.81 * 2.0
+	if accel > max_val
+		-> true
+	;;
+	if pos > sp * 1.1
+		-> true
+	;;
+	-> false
+}
+
+const simulate = {k_consts : control_t
+	const dt = 0.01
+	const max_time = 10.0
+	const integral_vals = 100
+
+	var velocity : flt64[:] = std.slzalloc((math.ceil(max_time / dt) : std.size) + 2)
+	var position : flt64[:] = std.slzalloc((math.ceil(max_time / dt) : std.size) + 2)
+	var set_point : flt64[:] = std.slzalloc((math.ceil(max_time / dt) : std.size) + 2)
+	var integrals : flt64[:] = std.slzalloc(integral_vals)
+	var state : state_t = [.integral_vals=integrals, .last_val=0.0, .dt=dt, .iters=0, .running_sum=0.0]
+	
+	var i = 0
+
+	for var t : flt64 = 0.0; t < max_time; t += dt
+		set_point[i] = setpoint(t)
+		var accel = control(set_point[i], position[i], &k_consts, &state, i)
+
+		if filter(t, set_point[i], accel, position[i])
+			-> 1e99
+		;;
+		velocity[i+1] = velocity[i] + accel * dt
+		position[i+1] = position[i] + velocity[i] * dt
+
+
+		//std.put("{}, {}, {}, {}, {}\n", t, set_point[i], position[i], velocity[i], accel)
+		i++
+	;;
+	
+	var tot_error : flt64[:] = std.slzalloc((math.ceil(max_time / dt) : std.size) + 2)
+	for var j = 0; j < position.len; j++
+		// Use FMA to reduce rounding errors for subtraction (???)
+		// workaround to broken std.abs
+		var tmp = math.fma(position[j], -1.0, set_point[j])
+		if tmp < 0.0; tmp = -tmp;;
+		tot_error[j] = tmp
+		//std.put("{},{}\n", set_point[j] - position[j], tot_error[j])
+	;;
+	var err = math.kahan_sum(tot_error)
+	std.slfree(velocity)
+	std.slfree(position)
+	std.slfree(set_point)
+	std.slfree(integrals)
+	std.slfree(tot_error)
+	-> err
+}
+
+const do_crossover = {fitness, pop, parents, mutation_rate -> control_t[:]
+	/* crossover, make children */
+	var children : control_t[:] = std.slalloc(pop.len)
+	// Copy parents to new pool
+	for var i = 0; i < parents; i++
+		children[i] = pop[fitness[i].1]
+	;;
+
+	for var i = parents; i < pop.len; i++
+		var parent1 = std.rand(0, parents)
+		var parent2 = std.rand(0, parents)
+		while parent1 == parent2
+			parent2 = std.rand(0, parents)
+		;;
+
+		/* Pick genes from parents */
+		var pick = std.rand(0, 2)
+		if pick == 1
+			children[i] = [.kp=children[parent1].kp, .kd=children[parent1].kd, .ki=children[parent2].ki]
+		else
+			children[i] = [.kp=children[parent1].kp, .kd=children[parent2].kd, .ki=children[parent2].ki]
+		;;
+
+		/* Mutate random gene */
+		if std.rand(0, 100) < mutation_rate - 1
+			match std.rand(0, 3)
+			| 0: children[i].kp = ((std.rand(0, 20000) - 10000) : flt64) / 1000.0
+			| 1: children[i].kd = ((std.rand(0, 20000) - 10000) : flt64) / 1000.0
+			| 2: children[i].ki = ((std.rand(0, 20000) - 10000) : flt64) / 1000.0
+			| _:
+			;;
+		;;
+	;;
+	-> children
+}
+
+const init_pop = {pop
+	/* Initialize population with random values */
+	for var i = 0; i < pop.len; i++
+		var kpr : flt64 = ((std.rand(0, 20000) - 10000) : flt64) / 1000.0
+		var kdr : flt64 = ((std.rand(0, 20000) - 10000) : flt64) / 1000.0
+		var kir : flt64 = ((std.rand(0, 20000) - 10000) : flt64) / 1000.0
+		pop[i] = [.kp=kpr, .kd=kdr, .ki=kir]
+	;;
+}
+
+const cmp_fitness = {a : (flt64, std.size), b : (flt64, std.size) -> std.order
+	var w, x, y, z
+	(w, x) = a
+	(y, z) = b
+	if w < y
+		-> `std.Before
+	elif w > y
+		-> `std.After
+	else
+		if x < z
+			-> `std.Before
+		else
+			-> `std.After
+		;;
+	;;
+	-> `std.Equal
+}
+
+const main = {
+	const pop_size = 10
+	const generations = 10000
+	const mating_parents = 2
+	const offspring_num = pop_size - mating_parents
+	const mutation_rate = 7
+
+	var pop : control_t[:] = std.slalloc(pop_size)
+	var new_pop : control_t[:]
+	init_pop(pop)
+
+	/* Fitness score and parent ID */
+	var fitness : (flt64, std.size)[:] = std.slzalloc(pop_size)
+	for var j = 0; j < generations; j++
+		std.put("\rGeneration: {}", j)
+		/* Run single generation, get fitness */
+		for var i = 0; i < pop_size; i++
+			fitness[i] = (simulate(pop[i]), i)
+		;;
+		std.sort(fitness, cmp_fitness)
+
+		if pop_size > 1
+			new_pop = do_crossover(fitness, pop, mating_parents, mutation_rate)
+			std.slfree(pop)
+			pop = new_pop
+		;;
+	;;
+	std.put("\n")
+
+	for var i = 0; i < pop_size; i++
+		std.put("{}, {}\n", pop[i], fitness[i])
+	;;
+
+	std.slfree(fitness)
+	std.slfree(pop)
+}

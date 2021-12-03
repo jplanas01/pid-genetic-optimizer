@@ -1,0 +1,65 @@
+use std
+use math
+
+type state_t = struct
+	integral_vals : flt64[:]
+	last_val : flt64
+	dt : flt64
+;;
+
+type control_t = struct
+	kp : flt64
+	kd : flt64
+	ki : flt64
+;;
+
+/* sp = setpoint, pv = provess variable/value */
+const control = {sp, pv, control, state, i -> flt64
+	var e =  sp - pv
+	
+	state.integral_vals[i % state.integral_vals.len] = e * state.dt
+	var integral = math.priest_sum(state.integral_vals)
+	var der = (e - state.last_val) / state.dt
+	state.last_val = e
+
+	-> control.kp * e + control.ki * integral + control.kd * der
+}
+const setpoint = {t : flt64 -> flt64
+	if t < 2.0
+		-> 0.0
+	;;
+	-> 2.0
+}
+
+const simulate = {k_consts : control_t
+	const dt = 0.01
+	const max_time = 10.0
+	const max_val = 9.81 * 2.0
+	const integral_vals = 100
+
+	var velocity : flt64[:] = std.slzalloc((math.ceil(max_time / dt) : std.size) + 2)
+	var position : flt64[:] = std.slzalloc((math.ceil(max_time / dt) : std.size) + 2)
+	var set_point : flt64[:] = std.slzalloc((math.ceil(max_time / dt) : std.size) + 2)
+	var integrals : flt64[:] = std.slzalloc(integral_vals)
+	var state : state_t = [.integral_vals=integrals, .last_val=0.0, .dt=dt]
+	var i = 0
+
+	/* To constrain accel, set arbitrarily high error if threshold breached */
+	for var t : flt64 = 0.0; t < max_time; t += dt
+		set_point[i] = setpoint(t)
+		var accel = control(set_point[i], position[i], &k_consts, &state, i)
+		velocity[i+1] = velocity[i] + accel * dt
+		position[i+1] = position[i] + velocity[i] * dt
+
+		std.put("{}, {}, {}, {}, {}\n", t, set_point[i], position[i], velocity[i], accel)
+		i++
+	;;
+	std.slfree(velocity)
+	std.slfree(position)
+	std.slfree(set_point)
+}
+
+const main = {
+	var sim : control_t = [.kp=3.157, .kd=-5.184, .ki=9.573]
+	simulate(sim)
+}
